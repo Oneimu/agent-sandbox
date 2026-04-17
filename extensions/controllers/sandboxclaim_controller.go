@@ -41,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -206,7 +207,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Suppress expected user errors (like missing templates) to avoid crash loops
-	if errors.Is(reconcileErr, ErrTemplateNotFound) || errors.Is(reconcileErr, ErrInvalidMetadata) {
+	if errors.Is(reconcileErr, ErrInvalidMetadata) {
 		logger.V(1).Info("Sandboxclaim suppressed error(s) encountered", "error", reconcileErr, "request", req.NamespacedName)
 		return result, nil
 	}
@@ -995,9 +996,31 @@ func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	r.MaxConcurrentReconciles = concurrentWorkers
 
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &extensionsv1alpha1.SandboxClaim{}, "spec.templateRef.name", func(rawObj client.Object) []string {
+		claim := rawObj.(*extensionsv1alpha1.SandboxClaim)
+		return []string{claim.Spec.TemplateRef.Name}
+	}); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1alpha1.SandboxClaim{}, builder.WithPredicates(r.getTimingPredicate())).
 		Owns(&v1alpha1.Sandbox{}).
+		Watches(
+			&extensionsv1alpha1.SandboxTemplate{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
+				template := obj.(*extensionsv1alpha1.SandboxTemplate)
+				var claims extensionsv1alpha1.SandboxClaimList
+				if err := r.List(ctx, &claims, client.InNamespace(template.Namespace), client.MatchingFields{"spec.templateRef.name": template.Name}); err != nil {
+					return nil
+				}
+				var requests []ctrl.Request
+				for _, claim := range claims.Items {
+					requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}})
+				}
+				return requests
+			}),
+		).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)
 }
