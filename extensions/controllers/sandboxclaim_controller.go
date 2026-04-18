@@ -206,7 +206,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		result = ctrl.Result{RequeueAfter: timeLeft}
 	}
 
-	// Suppress expected user errors (like missing templates) to avoid crash loops
+	// Suppress invalid metadata errors to avoid crash loops
 	if errors.Is(reconcileErr, ErrInvalidMetadata) {
 		logger.V(1).Info("Sandboxclaim suppressed error(s) encountered", "error", reconcileErr, "request", req.NamespacedName)
 		return result, nil
@@ -998,6 +998,9 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWo
 
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &extensionsv1alpha1.SandboxClaim{}, "spec.templateRef.name", func(rawObj client.Object) []string {
 		claim := rawObj.(*extensionsv1alpha1.SandboxClaim)
+		if claim.Spec.TemplateRef.Name == "" {
+			return nil
+		}
 		return []string{claim.Spec.TemplateRef.Name}
 	}); err != nil {
 		return err
@@ -1009,12 +1012,17 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWo
 		Watches(
 			&extensionsv1alpha1.SandboxTemplate{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
-				template := obj.(*extensionsv1alpha1.SandboxTemplate)
-				var claims extensionsv1alpha1.SandboxClaimList
-				if err := r.List(ctx, &claims, client.InNamespace(template.Namespace), client.MatchingFields{"spec.templateRef.name": template.Name}); err != nil {
+				template, ok := obj.(*extensionsv1alpha1.SandboxTemplate)
+				if !ok {
+					log.FromContext(ctx).Error(fmt.Errorf("unexpected object type %T", obj), "expected SandboxTemplate in watch map function")
 					return nil
 				}
-				var requests []ctrl.Request
+				var claims extensionsv1alpha1.SandboxClaimList
+				if err := r.List(ctx, &claims, client.InNamespace(template.Namespace), client.MatchingFields{"spec.templateRef.name": template.Name}); err != nil {
+					log.FromContext(ctx).Error(err, "failed to list SandboxClaims for SandboxTemplate", "namespace", template.Namespace, "name", template.Name)
+					return nil
+				}
+				requests := make([]ctrl.Request, 0, len(claims.Items))
 				for _, claim := range claims.Items {
 					requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}})
 				}

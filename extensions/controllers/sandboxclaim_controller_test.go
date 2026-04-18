@@ -414,7 +414,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			claimToReconcile: claim,
 			existingObjects:  []client.Object{},
 			expectSandbox:    false,
-			expectError:      false,
+			expectError:      true,
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "TemplateNotFound", Message: `SandboxTemplate "test-template" not found`,
 			},
